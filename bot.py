@@ -1,6 +1,9 @@
 import asyncio
 import json
 import os
+import http.server
+import socketserver
+import threading
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ChatType
@@ -390,7 +393,15 @@ async def admin_group(message: Message):
         print(f"Ошибка отправки: {e}")
 
 # --- Запуск ---
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        print(f"Dummy server started on port {port}")
+        httpd.serve_forever()
+
 async def main():
+    threading.Thread(target=start_dummy_server, daemon=True).start()
     print("Бот запущен...")
     await dp.start_polling(bot)
 
