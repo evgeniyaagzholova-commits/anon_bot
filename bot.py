@@ -10,7 +10,7 @@ from aiogram.enums import ChatType
 from aiogram.client.default import DefaultBotProperties
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = "8873918257:AAFxarw6WGvYjaBpb9KGWH0R-n7yH1rIueI"
 ADMIN_ID = 922545502
 GROUP_ID = -1004291975368
 
