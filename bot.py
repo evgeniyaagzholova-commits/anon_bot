@@ -7,7 +7,7 @@ from aiogram.enums import ChatType
 from aiogram.client.default import DefaultBotProperties
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = "TOKEN_PLACEHOLDER"
+BOT_TOKEN = "8873918257:AAH3yotGoorAuUnhBp3QLhPwA_gxglokmbg"
 ADMIN_ID = 922545502
 GROUP_ID = -1004291975368
 
