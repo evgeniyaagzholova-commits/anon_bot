@@ -505,6 +505,29 @@ async def admin_group(message: Message):
                 )
             except: pass
         print(f"Ошибка: {e}")
+        # --- Команда /reset для пользователя ---
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/reset")
+async def cmd_reset(message: Message):
+    uid = message.from_user.id
+
+    if uid == ADMIN_ID:
+        await message.answer("✧ Админ не может сбросить себя.")
+        return
+
+    db = load_db()
+    if str(uid) not in db:
+        await message.answer("❋ Вас нет в базе. Напишите /start.")
+        return
+
+    old_number = db[str(uid)].get("number", "?")
+    del db[str(uid)]
+    save_db(db)
+
+    await message.answer(
+        "✧ Ваша регистрация сброшена.\n\n"
+        f"№ Был номер: <b>#{old_number}</b>\n\n"
+        "Напишите /start, чтобы зарегистрироваться заново и получить новую тему."
+    )
 
 # --- Запуск ---
 def start_dummy_server():
