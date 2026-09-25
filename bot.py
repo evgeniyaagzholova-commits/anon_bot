@@ -39,8 +39,6 @@ WELCOME_TEXT = (
     "↓ Выбери, что тебе нужно:"
 )
 
-# =======================
-
 DB_FILE = "users.json"
 STATS_FILE = "stats.json"
 FLUD_FILE = "flud.json"
@@ -244,19 +242,20 @@ async def cb_gender(cb: CallbackQuery):
         del db[str(uid)]["pending_topic"]
         save_db(db)
 
-    await cb.message.edit_caption(
-        caption=(
-            f"✧ Готово!\n\n"
-            f"✦ Тема: <b>{topic_name}</b>\n"
-            f"♡ Хочешь админа: <b>{gender}</b>\n\n"
-            f"Теперь можешь писать сообщение — оно уйдёт администратору."
-        ),
-        reply_markup=kb_main()
-    ) if cb.message.caption else await cb.message.edit_text(
-        f"✧ Готово!\n\n✦ Тема: <b>{topic_name}</b>\n♡ Хочешь админа: <b>{gender}</b>\n\n"
-        f"Теперь можешь писать сообщение — оно уйдёт администратору.",
-        reply_markup=kb_main()
+    final_text = (
+        f"✧ Готово!\n\n"
+        f"✦ Тема: <b>{topic_name}</b>\n"
+        f"♡ Хочешь админа: <b>{gender}</b>\n\n"
+        f"Теперь можешь писать сообщение — оно уйдёт администратору."
     )
+
+    try:
+        if cb.message.caption:
+            await cb.message.edit_caption(caption=final_text, reply_markup=kb_main())
+        else:
+            await cb.message.edit_text(final_text, reply_markup=kb_main())
+    except Exception:
+        await bot.send_message(uid, final_text, reply_markup=kb_main())
     await cb.answer()
 
 # --- Антифлуд ---
@@ -364,7 +363,7 @@ async def backup_loop():
         except Exception as e:
             print(f"Бэкап ошибка: {e}")
 
-# --- Команды админа ---
+# --- Команды админа (в личке) ---
 async def handle_admin_command(message: Message):
     text = message.text.strip()
     parts = text.split(maxsplit=1)
@@ -460,14 +459,15 @@ async def handle_admin_command(message: Message):
         await status.edit_text(f"✦ <b>Готово</b>\n\nОтправлено: <b>{sent}</b>\nОшибок: <b>{failed}</b>")
         return
 
-# --- Команды в группе ---
+# --- Команды в группе (от ЛЮБОГО админа) ---
 @dp.message(F.chat.id == GROUP_ID)
 async def admin_group(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    if not message.message_thread_id: return
+    if not message.message_thread_id:
+        return
 
     uid = find_user_by_topic(message.message_thread_id)
-    if not uid: return
+    if not uid:
+        return
 
     text = (message.text or "").strip()
 
@@ -488,7 +488,8 @@ async def admin_group(message: Message):
             await message.reply(f"✦ #{db[str(uid)].get('number','?')} разблокирован.")
         return
 
-    if text.startswith("/"): return
+    if text.startswith("/"):
+        return
 
     try:
         await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
@@ -503,9 +504,11 @@ async def admin_group(message: Message):
                     message_thread_id=message.message_thread_id,
                     name=f"🔒 Заблокировал бота"
                 )
-            except: pass
+            except:
+                pass
         print(f"Ошибка: {e}")
-        # --- Команда /reset для пользователя ---
+
+# --- Команда /reset для пользователя ---
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/reset")
 async def cmd_reset(message: Message):
     uid = message.from_user.id
