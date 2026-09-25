@@ -28,7 +28,7 @@ BANNER_TOPIC = "https://i.ibb.co.com/Z42GnWK/photo-2026-09-24-22-57-48.jpg"
 BANNER_GENDER = "https://i.ibb.co.com/ymsM3sDd/photo-2026-09-24-22-57-34.jpg"
 
 WELCOME_TEXT = (
-    "✧ Добро пожаловать в бот поддержки «Милый дом» ♡\n\n"
+    "✧ Добро пожаловать в бот поддержки и общения «Милый дом» ♡\n\n"
     "Здесь тебя всегда выслушают и поймут.\n\n"
     "✉ Напиши «Привет» — и с тобой свяжется первый свободный администратор.\n\n"
     "❋ Бот полностью анонимен.\n"
@@ -110,12 +110,14 @@ def kb_topics():
         [InlineKeyboardButton(text="❋ Общение", callback_data="topic:Общение")],
         [InlineKeyboardButton(text="✦ Поддержка/Общение", callback_data="topic:Поддержка/Общение")],
         [InlineKeyboardButton(text="♡ Ролка", callback_data="topic:Ролка")],
+        [InlineKeyboardButton(text="❥ Флирт", callback_data="topic:Флирт")],
     ])
 
 def kb_gender():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✧ Парень", callback_data="gender:Парень")],
         [InlineKeyboardButton(text="❋ Девушка", callback_data="gender:Девушка")],
+        [InlineKeyboardButton(text="✦ Без разницы", callback_data="gender:Без разницы")],
     ])
 
 # --- Создание темы ---
