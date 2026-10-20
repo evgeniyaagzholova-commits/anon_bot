@@ -17,6 +17,9 @@ ADMIN_ID = 922545502
 GROUP_ID = -1004291975368
 LOG_CHANNEL_ID = -1004378039855
 
+# Канал для хранения базы данных (может быть тот же, что и для логов)
+DB_BACKUP_CHANNEL_ID = -1004378039855 
+
 # Ссылки
 LINK_ANKETA = "http://t.me/Just_my_thoughts_anketa_bot"
 LINK_CHANNEL = "https://t.me/+aG7myjG7KG5jYTFi"
@@ -46,7 +49,7 @@ FLUD_FILE = "flud.json"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# --- База ---
+# --- Работа с JSON ---
 def load_json(path, default=None):
     if not os.path.exists(path):
         return default if default is not None else {}
@@ -59,11 +62,38 @@ def save_json(path, data):
 
 def load_db(): return load_json(DB_FILE, {})
 def save_db(d): save_json(DB_FILE, d)
-def load_stats(): return load_json(STATS_FILE, {"incoming": 0, "outgoing": 0})
+def load_stats(): return load_json(STATS_FILE, {"incoming": 0, "outgoing": 0, "blocked_us": 0})
 def save_stats(d): save_json(STATS_FILE, d)
 def load_flud(): return load_json(FLUD_FILE, {})
 def save_flud(d): save_json(FLUD_FILE, d)
 
+# --- Синхронизация с Telegram ---
+async def sync_db_to_tg():
+    try:
+        if os.path.exists(DB_FILE):
+            await bot.send_document(
+                chat_id=DB_BACKUP_CHANNEL_ID,
+                document=FSInputFile(DB_FILE),
+                caption=f"✧ Автосохранение базы\n{datetime.now().strftime('%d.%m %H:%M')}"
+            )
+    except Exception as e:
+        print(f"Ошибка синхронизации с ТГ: {e}")
+
+async def load_db_from_tg():
+    try:
+        messages = await bot.get_chat_history(chat_id=DB_BACKUP_CHANNEL_ID, limit=10)
+        for msg in messages:
+            if msg.document and msg.document.file_name == DB_FILE:
+                file_id = msg.document.file_id
+                file = await bot.get_file(file_id)
+                await bot.download_file(file.file_path, DB_FILE)
+                print("✅ База успешно восстановлена из Telegram!")
+                return
+        print("ℹ️ Файл базы в канале не найден. Создаем новую.")
+    except Exception as e:
+        print(f"Ошибка загрузки базы из ТГ: {e}")
+
+# --- Вспомогательные функции ---
 def inc_incoming():
     s = load_stats(); s["incoming"] = s.get("incoming", 0) + 1; save_stats(s)
 
@@ -88,7 +118,6 @@ def find_user_by_number(number):
             return int(uid), info
     return None, None
 
-# --- Логирование ---
 async def log_action(text):
     try:
         await bot.send_message(LOG_CHANNEL_ID, text)
@@ -146,6 +175,7 @@ async def create_topic(user_id, topic_name, gender, username):
         "last_auto_reply": 0,
     })
     save_db(db)
+    await sync_db_to_tg()
 
     await bot.send_message(
         chat_id=GROUP_ID,
@@ -332,7 +362,7 @@ async def auto_reply_loop():
                 if last_auto >= last_user:
                     continue
 
-                hour = datetime.now().hour
+                hour = (datetime.now().hour + 5) % 24
                 is_night = hour >= 2 and hour < 9
                 wait = 600 if is_night else 7200
 
@@ -351,19 +381,11 @@ async def auto_reply_loop():
         except Exception as e:
             print(f"Автоответ ошибка: {e}")
 
-# --- Автобэкап ---
+# --- Периодический бэкап ---
 async def backup_loop():
     while True:
         await asyncio.sleep(1800)
-        try:
-            if os.path.exists(DB_FILE):
-                await bot.send_document(
-                    ADMIN_ID,
-                    FSInputFile(DB_FILE),
-                    caption=f"✧ Автобэкап базы\n{datetime.now().strftime('%d.%m.%Y %H:%M')}"
-                )
-        except Exception as e:
-            print(f"Бэкап ошибка: {e}")
+        await sync_db_to_tg()
 
 # --- Команды админа (в личке) ---
 async def handle_admin_command(message: Message):
@@ -388,11 +410,13 @@ async def handle_admin_command(message: Message):
         total = len([u for u in db.values() if u.get("registered")])
         blocked = sum(1 for v in db.values() if v.get("blocked"))
         s = load_stats()
+        blocked_us = s.get("blocked_us", 0)
         await message.answer(
             f"✧ <b>Статистика</b>\n\n"
             f"♡ Всего: <b>{total}</b>\n"
             f"✦ Чистых: <b>{total - blocked}</b>\n"
-            f"🚫 Заблокированных: <b>{blocked}</b>\n\n"
+            f"🚫 Заблокированы нами: <b>{blocked}</b>\n"
+            f"🔒 Заблокировали нас: <b>{blocked_us}</b>\n\n"
             f"↓ Входящих: <b>{s.get('incoming', 0)}</b>\n"
             f"↑ Исходящих: <b>{s.get('outgoing', 0)}</b>"
         )
@@ -439,6 +463,7 @@ async def handle_admin_command(message: Message):
             await message.answer(f"❋ Пользователь #{num} не найден."); return
         db[str(uid)]["blocked"] = False
         save_db(db)
+        await sync_db_to_tg()
         await message.answer(f"✦ Пользователь #{num} разблокирован.")
         return
 
@@ -447,21 +472,39 @@ async def handle_admin_command(message: Message):
             await message.answer("Используй: <code>/broadcast Текст</code>"); return
         bc_text = parts[1].strip()
         users = [u for u, v in db.items() if v.get("registered") and not v.get("blocked")]
-        sent = 0; failed = 0
+        sent = 0; failed = 0; blocked_by_user = 0
+        
         status = await message.answer(f"↓ Отправляю... 0/{len(users)}")
         for i, u in enumerate(users, 1):
             try:
                 await bot.send_message(int(u), f"✦ <b>Сообщение от админа:</b>\n\n{bc_text}")
                 sent += 1
-            except: failed += 1
+            except Exception as e:
+                err = str(e).lower()
+                if "blocked" in err or "forbidden" in err:
+                    blocked_by_user += 1
+                else:
+                    failed += 1
+            
             if i % 10 == 0:
                 try: await status.edit_text(f"↓ Отправляю... {i}/{len(users)}")
                 except: pass
             await asyncio.sleep(0.05)
-        await status.edit_text(f"✦ <b>Готово</b>\n\nОтправлено: <b>{sent}</b>\nОшибок: <b>{failed}</b>")
+            
+        if blocked_by_user > 0:
+            s = load_stats()
+            s["blocked_us"] = s.get("blocked_us", 0) + blocked_by_user
+            save_stats(s)
+            
+        await status.edit_text(
+            f"✦ <b>Готово</b>\n\n"
+            f"Отправлено: <b>{sent}</b>\n"
+            f"Ошибок: <b>{failed}</b>\n"
+            f"Заблокировали нас: <b>{blocked_by_user}</b>"
+        )
         return
 
-# --- Команды в группе (от ЛЮБОГО админа) ---
+# --- Команды в группе ---
 @dp.message(F.chat.id == GROUP_ID)
 async def admin_group(message: Message):
     if not message.message_thread_id:
@@ -478,6 +521,7 @@ async def admin_group(message: Message):
         if str(uid) in db:
             db[str(uid)]["blocked"] = True
             save_db(db)
+            await sync_db_to_tg()
             await message.reply(f"🚫 #{db[str(uid)].get('number','?')} заблокирован.")
             await log_action(f"🚫 Заблокирован #{db[str(uid)].get('number','?')}")
         return
@@ -487,6 +531,7 @@ async def admin_group(message: Message):
         if str(uid) in db:
             db[str(uid)]["blocked"] = False
             save_db(db)
+            await sync_db_to_tg()
             await message.reply(f"✦ #{db[str(uid)].get('number','?')} разблокирован.")
         return
 
@@ -510,7 +555,7 @@ async def admin_group(message: Message):
                 pass
         print(f"Ошибка: {e}")
 
-# --- Команда /reset для пользователя ---
+# --- Команда /reset ---
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/reset")
 async def cmd_reset(message: Message):
     uid = message.from_user.id
@@ -527,6 +572,7 @@ async def cmd_reset(message: Message):
     old_number = db[str(uid)].get("number", "?")
     del db[str(uid)]
     save_db(db)
+    await sync_db_to_tg()
 
     await message.answer(
         "✧ Ваша регистрация сброшена.\n\n"
@@ -544,6 +590,9 @@ def start_dummy_server():
 
 async def main():
     threading.Thread(target=start_dummy_server, daemon=True).start()
+    
+    await load_db_from_tg()
+    
     asyncio.create_task(auto_reply_loop())
     asyncio.create_task(backup_loop())
     print("Бот запущен...")
