@@ -17,7 +17,7 @@ ADMIN_ID = 922545502
 GROUP_ID = -1004291975368
 LOG_CHANNEL_ID = -1004378039855
 
-# Канал для хранения базы данных (может быть тот же, что и для логов)
+# Канал для хранения базы данных
 DB_BACKUP_CHANNEL_ID = -1004378039855 
 
 # Ссылки
@@ -49,7 +49,9 @@ FLUD_FILE = "flud.json"
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# --- Работа с JSON ---
+# =====================================================================
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =====================================================================
 def load_json(path, default=None):
     if not os.path.exists(path):
         return default if default is not None else {}
@@ -67,7 +69,6 @@ def save_stats(d): save_json(STATS_FILE, d)
 def load_flud(): return load_json(FLUD_FILE, {})
 def save_flud(d): save_json(FLUD_FILE, d)
 
-# --- Синхронизация с Telegram ---
 async def sync_db_to_tg():
     try:
         if os.path.exists(DB_FILE):
@@ -89,11 +90,10 @@ async def load_db_from_tg():
                 await bot.download_file(file.file_path, DB_FILE)
                 print("✅ База успешно восстановлена из Telegram!")
                 return
-        print("ℹ️ Файл базы в канале не найден. Создаем новую.")
+        print("ℹ️ Файл базы в канале не найден.")
     except Exception as e:
         print(f"Ошибка загрузки базы из ТГ: {e}")
 
-# --- Вспомогательные функции ---
 def inc_incoming():
     s = load_stats(); s["incoming"] = s.get("incoming", 0) + 1; save_stats(s)
 
@@ -124,7 +124,20 @@ async def log_action(text):
     except Exception as e:
         print(f"Ошибка логирования: {e}")
 
-# --- Клавиатуры ---
+def check_flood(user_id):
+    flud = load_flud()
+    now = time.time()
+    uid = str(user_id)
+    if uid not in flud:
+        flud[uid] = []
+    flud[uid] = [t for t in flud[uid] if now - t < 60]
+    flud[uid].append(now)
+    save_flud(flud)
+    return len(flud[uid]) >= 10
+
+# =====================================================================
+# 2. КЛАВИАТУРЫ
+# =====================================================================
 def kb_main():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✧ Анкета", url=LINK_ANKETA)],
@@ -149,7 +162,162 @@ def kb_gender():
         [InlineKeyboardButton(text="✦ Без разницы", callback_data="gender:Без разницы")],
     ])
 
-# --- Создание темы ---
+# =====================================================================
+# 3. ОБРАБОТЧИКИ КОМАНД (СНАЧАЛА /reset, ПОТОМ ВСЁ ОСТАЛЬНОЕ)
+# =====================================================================
+
+# --- Команда /reset ---
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/reset")
+async def cmd_reset(message: Message):
+    uid = message.from_user.id
+    db = load_db()
+
+    if str(uid) not in db:
+        await message.answer("❋ Вас нет в базе. Напишите /start.")
+        return
+
+    old_number = db[str(uid)].get("number", "?")
+    del db[str(uid)]
+    save_db(db)
+    await sync_db_to_tg()
+
+    await message.answer(
+        "✧ Ваша регистрация сброшена.\n\n"
+        f"№ Был номер: <b>#{old_number}</b>\n\n"
+        "Напишите /start, чтобы зарегистрироваться заново и получить новую тему."
+    )
+
+# --- /start ---
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/start")
+async def cmd_start(message: Message):
+    uid = message.from_user.id
+    if uid == ADMIN_ID:
+        await message.answer(
+            "✧ <b>Команды админа:</b>\n\n"
+            "/stats — статистика\n"
+            "/blocked — список заблокированных\n"
+            "/find НОМЕР — найти по номеру\n"
+            "/unban НОМЕР — разблокировать\n"
+            "/broadcast текст — рассылка\n"
+            "/help — эта справка"
+        )
+        return
+
+    db = load_db()
+    if str(uid) in db and db[str(uid)].get("registered"):
+        await message.answer("✧ Вы уже зарегистрированы. Напишите сообщение.", reply_markup=kb_main())
+        return
+
+    try:
+        await bot.send_photo(
+            chat_id=uid,
+            photo=BANNER_TOPIC,
+            caption=WELCOME_TEXT,
+            reply_markup=kb_topics()
+        )
+    except Exception:
+        await message.answer(WELCOME_TEXT, reply_markup=kb_topics())
+
+# --- Сообщение от пользователя (САМЫЙ ПОСЛЕДНИЙ ИЗ ЛИЧНЫХ) ---
+@dp.message(F.chat.type == ChatType.PRIVATE)
+async def user_message(message: Message):
+    uid = message.from_user.id
+
+    if uid == ADMIN_ID:
+        if message.text and message.text.startswith("/"):
+            await handle_admin_command(message)
+        return
+
+    if check_flood(uid):
+        await message.answer("🚫 Слишком много сообщений. Подожди 3 минуты.")
+        return
+
+    db = load_db()
+    if str(uid) not in db or not db[str(uid)].get("registered"):
+        await message.answer("✧ Сначала выбери, что тебе нужно:", reply_markup=kb_topics())
+        return
+
+    if db[str(uid)].get("blocked"):
+        await message.answer("🚫 Вы заблокированы. Обратитесь к администратору.")
+        return
+
+    topic_id = db[str(uid)].get("topic_id")
+    if not topic_id:
+        await message.answer("❋ Тема не найдена. Напиши /start заново.")
+        return
+
+    try:
+        await bot.copy_message(
+            chat_id=GROUP_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            message_thread_id=topic_id
+        )
+        inc_incoming()
+        db = load_db()
+        db[str(uid)]["last_user_msg"] = time.time()
+        save_db(db)
+    except Exception as e:
+        print(f"Ошибка копирования: {e}")
+
+# =====================================================================
+# 4. ОСТАЛЬНЫЕ ФУНКЦИИ
+# =====================================================================
+
+@dp.callback_query(F.data.startswith("topic:"))
+async def cb_topic(cb: CallbackQuery):
+    topic_name = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    db = load_db()
+    if str(uid) not in db: db[str(uid)] = {}
+    db[str(uid)]["pending_topic"] = topic_name
+    save_db(db)
+
+    try:
+        await bot.send_photo(
+            chat_id=uid,
+            photo=BANNER_GENDER,
+            caption=f"✧ Ты выбрал: <b>{topic_name}</b>\n\n♡ Какого админа ты хочешь?",
+            reply_markup=kb_gender()
+        )
+    except Exception:
+        await cb.message.edit_text(
+            f"✧ Ты выбрал: <b>{topic_name}</b>\n\n♡ Какого админа ты хочешь?",
+            reply_markup=kb_gender()
+        )
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("gender:"))
+async def cb_gender(cb: CallbackQuery):
+    gender = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    db = load_db()
+    topic_name = db.get(str(uid), {}).get("pending_topic", "Общение")
+    username = cb.from_user.username or cb.from_user.first_name or "user"
+
+    await create_topic(uid, topic_name, gender, username)
+
+    db = load_db()
+    if "pending_topic" in db.get(str(uid), {}):
+        del db[str(uid)]["pending_topic"]
+        save_db(db)
+
+    final_text = (
+        f"✧ Готово!\n\n"
+        f"✦ Тема: <b>{topic_name}</b>\n"
+        f"♡ Хочешь админа: <b>{gender}</b>\n\n"
+        f"Теперь можешь писать сообщение — оно уйдёт администратору."
+    )
+
+    try:
+        if cb.message.caption:
+            await cb.message.edit_caption(caption=final_text, reply_markup=kb_main())
+        else:
+            await cb.message.edit_text(final_text, reply_markup=kb_main())
+    except Exception:
+        await bot.send_message(uid, final_text, reply_markup=kb_main())
+    await cb.answer()
+
 async def create_topic(user_id, topic_name, gender, username):
     db = load_db()
     if str(user_id) in db and db[str(user_id)].get("topic_id"):
@@ -203,191 +371,6 @@ async def notify_admin_new_topic(number, topic_name, gender):
     except Exception as e:
         print(f"Ошибка оповещения: {e}")
 
-# --- /start ---
-@dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/start")
-async def cmd_start(message: Message):
-    uid = message.from_user.id
-    if uid == ADMIN_ID:
-        await message.answer(
-            "✧ <b>Команды админа:</b>\n\n"
-            "/stats — статистика\n"
-            "/blocked — список заблокированных\n"
-            "/find НОМЕР — найти по номеру\n"
-            "/unban НОМЕР — разблокировать\n"
-            "/broadcast текст — рассылка\n"
-            "/help — эта справка"
-        )
-        return
-
-    db = load_db()
-    if str(uid) in db and db[str(uid)].get("registered"):
-        await message.answer("✧ Вы уже зарегистрированы. Напишите сообщение.")
-        return
-
-    try:
-        await bot.send_photo(
-            chat_id=uid,
-            photo=BANNER_TOPIC,
-            caption=WELCOME_TEXT,
-            reply_markup=kb_topics()
-        )
-    except Exception:
-        await message.answer(WELCOME_TEXT, reply_markup=kb_topics())
-
-# --- Выбор темы ---
-@dp.callback_query(F.data.startswith("topic:"))
-async def cb_topic(cb: CallbackQuery):
-    topic_name = cb.data.split(":", 1)[1]
-    uid = cb.from_user.id
-    db = load_db()
-    if str(uid) not in db: db[str(uid)] = {}
-    db[str(uid)]["pending_topic"] = topic_name
-    save_db(db)
-
-    try:
-        await bot.send_photo(
-            chat_id=uid,
-            photo=BANNER_GENDER,
-            caption=f"✧ Ты выбрал: <b>{topic_name}</b>\n\n♡ Какого админа ты хочешь?",
-            reply_markup=kb_gender()
-        )
-    except Exception:
-        await cb.message.edit_text(
-            f"✧ Ты выбрал: <b>{topic_name}</b>\n\n♡ Какого админа ты хочешь?",
-            reply_markup=kb_gender()
-        )
-    await cb.answer()
-
-# --- Выбор пола ---
-@dp.callback_query(F.data.startswith("gender:"))
-async def cb_gender(cb: CallbackQuery):
-    gender = cb.data.split(":", 1)[1]
-    uid = cb.from_user.id
-    db = load_db()
-    topic_name = db.get(str(uid), {}).get("pending_topic", "Общение")
-    username = cb.from_user.username or cb.from_user.first_name or "user"
-
-    await create_topic(uid, topic_name, gender, username)
-
-    db = load_db()
-    if "pending_topic" in db.get(str(uid), {}):
-        del db[str(uid)]["pending_topic"]
-        save_db(db)
-
-    final_text = (
-        f"✧ Готово!\n\n"
-        f"✦ Тема: <b>{topic_name}</b>\n"
-        f"♡ Хочешь админа: <b>{gender}</b>\n\n"
-        f"Теперь можешь писать сообщение — оно уйдёт администратору."
-    )
-
-    try:
-        if cb.message.caption:
-            await cb.message.edit_caption(caption=final_text, reply_markup=kb_main())
-        else:
-            await cb.message.edit_text(final_text, reply_markup=kb_main())
-    except Exception:
-        await bot.send_message(uid, final_text, reply_markup=kb_main())
-    await cb.answer()
-
-# --- Антифлуд ---
-def check_flood(user_id):
-    flud = load_flud()
-    now = time.time()
-    uid = str(user_id)
-    if uid not in flud:
-        flud[uid] = []
-    flud[uid] = [t for t in flud[uid] if now - t < 60]
-    flud[uid].append(now)
-    save_flud(flud)
-    return len(flud[uid]) >= 10
-
-# --- Сообщение от пользователя ---
-@dp.message(F.chat.type == ChatType.PRIVATE)
-async def user_message(message: Message):
-    uid = message.from_user.id
-
-    if uid == ADMIN_ID:
-        if message.text and message.text.startswith("/"):
-            await handle_admin_command(message)
-        return
-
-    if check_flood(uid):
-        await message.answer("🚫 Слишком много сообщений. Подожди 3 минуты.")
-        return
-
-    db = load_db()
-    if str(uid) not in db or not db[str(uid)].get("registered"):
-        await message.answer("✧ Сначала выбери, что тебе нужно:", reply_markup=kb_topics())
-        return
-
-    if db[str(uid)].get("blocked"):
-        await message.answer("🚫 Вы заблокированы. Обратитесь к администратору.")
-        return
-
-    topic_id = db[str(uid)].get("topic_id")
-    if not topic_id:
-        await message.answer("❋ Тема не найдена. Напиши /start заново.")
-        return
-
-    try:
-        await bot.copy_message(
-            chat_id=GROUP_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-            message_thread_id=topic_id
-        )
-        inc_incoming()
-        db = load_db()
-        db[str(uid)]["last_user_msg"] = time.time()
-        save_db(db)
-    except Exception as e:
-        print(f"Ошибка копирования: {e}")
-
-# --- Автоответ по таймеру ---
-async def auto_reply_loop():
-    while True:
-        await asyncio.sleep(60)
-        try:
-            now = time.time()
-            db = load_db()
-            for uid, info in list(db.items()):
-                if not info.get("registered") or info.get("blocked"):
-                    continue
-                topic_id = info.get("topic_id")
-                last_user = info.get("last_user_msg", 0)
-                last_auto = info.get("last_auto_reply", 0)
-                if not topic_id or not last_user:
-                    continue
-                if last_auto >= last_user:
-                    continue
-
-                hour = (datetime.now().hour + 5) % 24
-                is_night = hour >= 2 and hour < 9
-                wait = 600 if is_night else 7200
-
-                if now - last_user >= wait:
-                    text = (
-                        "🌙 Админы спят. Сладких снов! Утром обязательно ответим ♡"
-                        if is_night
-                        else "✧ Админ обязательно ответит, как только увидит. Подожди немного ♡"
-                    )
-                    try:
-                        await bot.send_message(int(uid), text)
-                        db[str(uid)]["last_auto_reply"] = now
-                        save_db(db)
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"Автоответ ошибка: {e}")
-
-# --- Периодический бэкап ---
-async def backup_loop():
-    while True:
-        await asyncio.sleep(1800)
-        await sync_db_to_tg()
-
-# --- Команды админа (в личке) ---
 async def handle_admin_command(message: Message):
     text = message.text.strip()
     parts = text.split(maxsplit=1)
@@ -504,7 +487,6 @@ async def handle_admin_command(message: Message):
         )
         return
 
-# --- Команды в группе ---
 @dp.message(F.chat.id == GROUP_ID)
 async def admin_group(message: Message):
     if not message.message_thread_id:
@@ -555,32 +537,48 @@ async def admin_group(message: Message):
                 pass
         print(f"Ошибка: {e}")
 
-# --- Команда /reset ---
-@dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/reset")
-async def cmd_reset(message: Message):
-    uid = message.from_user.id
+# --- Фоновые процессы ---
+async def auto_reply_loop():
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = time.time()
+            db = load_db()
+            for uid, info in list(db.items()):
+                if not info.get("registered") or info.get("blocked"):
+                    continue
+                topic_id = info.get("topic_id")
+                last_user = info.get("last_user_msg", 0)
+                last_auto = info.get("last_auto_reply", 0)
+                if not topic_id or not last_user:
+                    continue
+                if last_auto >= last_user:
+                    continue
 
-    if uid == ADMIN_ID:
-        await message.answer("✧ Админ не может сбросить себя.")
-        return
+                hour = (datetime.now().hour + 5) % 24
+                is_night = hour >= 2 and hour < 9
+                wait = 600 if is_night else 7200
 
-    db = load_db()
-    if str(uid) not in db:
-        await message.answer("❋ Вас нет в базе. Напишите /start.")
-        return
+                if now - last_user >= wait:
+                    text = (
+                        "🌙 Админы спят. Сладких снов! Утром обязательно ответим ♡"
+                        if is_night
+                        else "✧ Админ обязательно ответит, как только увидит. Подожди немного ♡"
+                    )
+                    try:
+                        await bot.send_message(int(uid), text)
+                        db[str(uid)]["last_auto_reply"] = now
+                        save_db(db)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Автоответ ошибка: {e}")
 
-    old_number = db[str(uid)].get("number", "?")
-    del db[str(uid)]
-    save_db(db)
-    await sync_db_to_tg()
+async def backup_loop():
+    while True:
+        await asyncio.sleep(1800)
+        await sync_db_to_tg()
 
-    await message.answer(
-        "✧ Ваша регистрация сброшена.\n\n"
-        f"№ Был номер: <b>#{old_number}</b>\n\n"
-        "Напишите /start, чтобы зарегистрироваться заново и получить новую тему."
-    )
-
-# --- Запуск ---
 def start_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     handler = http.server.SimpleHTTPRequestHandler
@@ -590,9 +588,7 @@ def start_dummy_server():
 
 async def main():
     threading.Thread(target=start_dummy_server, daemon=True).start()
-    
     await load_db_from_tg()
-    
     asyncio.create_task(auto_reply_loop())
     asyncio.create_task(backup_loop())
     print("Бот запущен...")
