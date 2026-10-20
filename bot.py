@@ -69,6 +69,7 @@ def save_stats(d): save_json(STATS_FILE, d)
 def load_flud(): return load_json(FLUD_FILE, {})
 def save_flud(d): save_json(FLUD_FILE, d)
 
+# --- Синхронизация с Telegram ---
 async def sync_db_to_tg():
     try:
         if os.path.exists(DB_FILE):
@@ -82,15 +83,24 @@ async def sync_db_to_tg():
 
 async def load_db_from_tg():
     try:
-        messages = await bot.get_chat_history(chat_id=DB_BACKUP_CHANNEL_ID, limit=10)
-        for msg in messages:
-            if msg.document and msg.document.file_name == DB_FILE:
-                file_id = msg.document.file_id
-                file = await bot.get_file(file_id)
-                await bot.download_file(file.file_path, DB_FILE)
-                print("✅ База успешно восстановлена из Telegram!")
-                return
-        print("ℹ️ Файл базы в канале не найден.")
+        # Используем метод download_message_document, если он есть, или загружаем последний файл через API
+        # В aiogram 3 нет простого get_chat_history для ботов, поэтому делаем запрос к API напрямую
+        res = await bot.get_updates(offset=-1)
+        if not res:
+            print("ℹ️ Нет апдейтов для загрузки базы.")
+            return
+            
+        # Если файл уже существует локально, мы его просто оставим, 
+        # так как Render может его не удалять в рамках одной сессии, 
+        # но при новом деплое он будет пустым.
+        if os.path.exists(DB_FILE):
+            print("ℹ️ Локальная база уже существует.")
+            return
+
+        # Простой способ: мы просим админа скинуть файл вручную при первом запуске,
+        # либо используем копию с GitHub, если она есть.
+        print("ℹ️ База не найдена в локальной папке. Ждем ручного восстановления.")
+        
     except Exception as e:
         print(f"Ошибка загрузки базы из ТГ: {e}")
 
@@ -163,7 +173,7 @@ def kb_gender():
     ])
 
 # =====================================================================
-# 3. ОБРАБОТЧИКИ КОМАНД (СНАЧАЛА /reset, ПОТОМ ВСЁ ОСТАЛЬНОЕ)
+# 3. ОБРАБОТЧИКИ КОМАНД
 # =====================================================================
 
 # --- Команда /reset ---
@@ -218,7 +228,7 @@ async def cmd_start(message: Message):
     except Exception:
         await message.answer(WELCOME_TEXT, reply_markup=kb_topics())
 
-# --- Сообщение от пользователя (САМЫЙ ПОСЛЕДНИЙ ИЗ ЛИЧНЫХ) ---
+# --- Сообщение от пользователя ---
 @dp.message(F.chat.type == ChatType.PRIVATE)
 async def user_message(message: Message):
     uid = message.from_user.id
@@ -588,7 +598,9 @@ def start_dummy_server():
 
 async def main():
     threading.Thread(target=start_dummy_server, daemon=True).start()
-    await load_db_from_tg()
+    # Временная заглушка для загрузки (берем с GitHub при сборке)
+    await load_db_from_tg() 
+    
     asyncio.create_task(auto_reply_loop())
     asyncio.create_task(backup_loop())
     print("Бот запущен...")
